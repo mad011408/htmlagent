@@ -1,11 +1,10 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
-    <title>Puter.js + Claude Chat</title>
+    <title>Puter.js + Claude Chat (with Fallback)</title>
 
-    <!-- Puter.js (keyless) -->
+    <!-- Puter.js -->
     <script src="https://js.puter.com/v2/"></script>
 
     <style>
@@ -67,14 +66,14 @@
 <body>
     <h1>Puter.js + Claude Chat</h1>
     <div class="subtitle">
-        System prompt + streaming + sab Anthropic Claude models.
+        System prompt + streaming + sab Anthropic Claude models (with usage‑limit fallback).
     </div>
 
     <form id="chat-form">
         <label for="system">System prompt (AI ka behaviour)</label>
         <textarea id="system" rows="4">
-You are Claude (Anthropic). 
-Explain clearly. If the user speaks Hindi, reply in Hindi. 
+You are Claude (Anthropic).
+Explain clearly. If the user speaks Hindi, reply in Hindi.
 Use short paragraphs and avoid hallucinations.
         </textarea>
 
@@ -106,7 +105,6 @@ Use short paragraphs and avoid hallucinations.
 
     <script>
         (async () => {
-            // Optional init
             if (typeof puter.init === "function") {
                 try {
                     await puter.init();
@@ -124,31 +122,54 @@ Use short paragraphs and avoid hallucinations.
             const statusEl = document.getElementById('status');
             const outputEl = document.getElementById('output');
 
+            async function callPuter(messages, model) {
+                const temperature = Number(tempEl.value) || 0.7;
+
+                // Puter docs style: chat(messages, testMode, options)
+                return await puter.ai.chat(
+                    messages,
+                    false,
+                    {
+                        model,
+                        stream: true,
+                        temperature,
+                        max_tokens: 800
+                    }
+                );
+            }
+
+            function parseDelegate(err) {
+                let obj = null;
+
+                if (err && typeof err === "object") {
+                    obj = err;
+                } else if (typeof err === "string") {
+                    try { obj = JSON.parse(err); } catch (e) { obj = null; }
+                }
+
+                const delegate =
+                    obj?.error?.delegate ||
+                    obj?.delegate ||
+                    null;
+
+                return { obj, delegate };
+            }
+
             async function runChat(userText, systemText) {
                 outputEl.innerHTML = '';
                 statusEl.textContent = 'Thinking with ' + modelEl.value + '… (streaming)';
                 runBtn.disabled = true;
 
+                const messages = [
+                    { role: "system", content: systemText.trim() },
+                    { role: "user",   content: userText.trim() }
+                ];
+
+                const selectedModel = modelEl.value;
+
                 try {
-                    const messages = [
-                        { role: "system", content: systemText.trim() },
-                        { role: "user",   content: userText.trim() }
-                    ];
-
-                    const temperature = Number(tempEl.value) || 0.7;
-
-                    // IMPORTANT: messages + testMode + options (docs signature)
-                    // puter.ai.chat([messages], testMode = false, options = {})
-                    const streamResp = await puter.ai.chat(
-                        messages,
-                        false, // testMode
-                        {
-                            model: modelEl.value,
-                            stream: true,
-                            temperature,
-                            max_tokens: 800
-                        }
-                    ); // [web:46][web:30]
+                    // 1) Try selected Claude model
+                    let streamResp = await callPuter(messages, selectedModel);
 
                     let fullText = '';
                     for await (const part of streamResp) {
@@ -158,15 +179,48 @@ Use short paragraphs and avoid hallucinations.
                         }
                     }
 
-                    statusEl.textContent = 'Done ✔';
+                    statusEl.textContent = 'Done ✔ (' + selectedModel + ')';
                 } catch (err) {
-                    console.error('Full error from puter.ai.chat:', err);
-                    statusEl.textContent = 'Error while calling Claude. Check console (F12).';
-                    const msg =
-                        (err && err.message) ||
-                        (typeof err === 'object' ? JSON.stringify(err) : String(err));
-                    outputEl.innerHTML =
-                        '<span style="color:#f97373;">Error: ' + msg + '</span>';
+                    console.error('Full error from puter.ai.chat (Claude):', err);
+                    const { obj, delegate } = parseDelegate(err);
+
+                    // usage limit triggered for Claude
+                    if (delegate === 'usage-limited-chat') {
+                        statusEl.textContent =
+                            'Claude free limit hit (usage-limited-chat). Trying GPT-5 nano fallback…';
+
+                        try {
+                            // 2) Fallback to a cheap OpenAI model via Puter (example: gpt-5-nano)
+                            const fallbackModel = 'gpt-5-nano'; // Puter examples ka default model
+                            let streamResp2 = await callPuter(messages, fallbackModel);
+
+                            let fullText2 = '';
+                            for await (const part of streamResp2) {
+                                if (part?.text) {
+                                    fullText2 += part.text;
+                                    outputEl.innerHTML = fullText2.replaceAll('\n', '<br>');
+                                }
+                            }
+
+                            statusEl.textContent = 'Done ✔ (fallback: ' + fallbackModel + ')';
+                        } catch (err2) {
+                            console.error('Fallback model error:', err2);
+                            statusEl.textContent =
+                                'Claude limit + fallback model error. Please try later or change network.';
+                            const msg2 =
+                                (err2 && err2.message) ||
+                                (typeof err2 === 'object' ? JSON.stringify(err2) : String(err2));
+                            outputEl.innerHTML =
+                                '<span style="color:#f97373;">Error: ' + msg2 + '</span>';
+                        }
+                    } else {
+                        statusEl.textContent = 'Error while calling Claude. Check console (F12).';
+                        const msg =
+                            (err && err.message) ||
+                            (typeof err === 'object' ? JSON.stringify(err) : String(err));
+                        outputEl.innerHTML =
+                            '<span style="color:#f97373;">Error: ' + msg + '</span>';
+                    }
                 } finally {
                     runBtn.disabled = false;
                 }
@@ -191,3 +245,4 @@ Use short paragraphs and avoid hallucinations.
     </script>
 </body>
 </html>
+
